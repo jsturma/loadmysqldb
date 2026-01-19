@@ -12,6 +12,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -190,9 +191,12 @@ func ensureDatabaseAndSchema(ctx context.Context, cfg Config) error {
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS payments (
 			p_md5 CHAR(32) PRIMARY KEY,
+			p_account_uuid CHAR(36) NOT NULL,
 			p_amount DECIMAL(10,2) NOT NULL,
 			p_epoch BIGINT NOT NULL,
-			INDEX idx_payments_epoch (p_epoch)
+			INDEX idx_payments_epoch (p_epoch),
+			INDEX idx_payments_account (p_account_uuid),
+			CONSTRAINT fk_payments_account FOREIGN KEY (p_account_uuid) REFERENCES accounts(a_uuid) ON DELETE CASCADE
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS buying_stats (
 			bs_account_uuid CHAR(36) NOT NULL,
@@ -213,7 +217,84 @@ func ensureDatabaseAndSchema(ctx context.Context, cfg Config) error {
 			return fmt.Errorf("create tables: %w", err)
 		}
 	}
+
+	// Handle upgrades when tables already existed (CREATE TABLE IF NOT EXISTS won't add new columns/constraints).
+	if err := migrateSchema(ctx, db, cfg.DBName); err != nil {
+		return fmt.Errorf("migrate schema: %w", err)
+	}
 	return nil
+}
+
+func migrateSchema(ctx context.Context, db *sql.DB, dbName string) error {
+	// payments -> accounts link
+	hasCol, err := columnExists(ctx, db, dbName, "payments", "p_account_uuid")
+	if err != nil {
+		return err
+	}
+	if !hasCol {
+		// Add nullable first so existing rows (if any) don't break migration.
+		if _, err := db.ExecContext(ctx, "ALTER TABLE payments ADD COLUMN p_account_uuid CHAR(36) NULL AFTER p_md5"); err != nil {
+			return err
+		}
+	}
+
+	hasIdx, err := indexExists(ctx, db, dbName, "payments", "idx_payments_account")
+	if err != nil {
+		return err
+	}
+	if !hasIdx {
+		if _, err := db.ExecContext(ctx, "CREATE INDEX idx_payments_account ON payments (p_account_uuid)"); err != nil {
+			return err
+		}
+	}
+
+	hasFK, err := foreignKeyExists(ctx, db, dbName, "payments", "fk_payments_account")
+	if err != nil {
+		return err
+	}
+	if !hasFK {
+		// If we migrated from an older schema, p_account_uuid is nullable; SET NULL is safest.
+		_, err := db.ExecContext(ctx, "ALTER TABLE payments ADD CONSTRAINT fk_payments_account FOREIGN KEY (p_account_uuid) REFERENCES accounts(a_uuid) ON DELETE SET NULL")
+		return err
+	}
+
+	return nil
+}
+
+func columnExists(ctx context.Context, db *sql.DB, dbName, tableName, columnName string) (bool, error) {
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.columns
+		 WHERE table_schema = ? AND table_name = ? AND column_name = ?`,
+		dbName, tableName, columnName,
+	).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func indexExists(ctx context.Context, db *sql.DB, dbName, tableName, indexName string) (bool, error) {
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.statistics
+		 WHERE table_schema = ? AND table_name = ? AND index_name = ?`,
+		dbName, tableName, indexName,
+	).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func foreignKeyExists(ctx context.Context, db *sql.DB, dbName, tableName, fkName string) (bool, error) {
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.table_constraints
+		 WHERE constraint_schema = ? AND table_name = ? AND constraint_name = ? AND constraint_type = 'FOREIGN KEY'`,
+		dbName, tableName, fkName,
+	).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 func loadData(ctx context.Context, cfg Config) error {
@@ -245,8 +326,8 @@ func loadData(ctx context.Context, cfg Config) error {
 	}
 	defer insProd.Close()
 
-	insPay, err := db.PrepareContext(ctx, `INSERT INTO payments (p_md5,p_amount,p_epoch)
-		VALUES (?,?,?)`)
+	insPay, err := db.PrepareContext(ctx, `INSERT INTO payments (p_md5,p_account_uuid,p_amount,p_epoch)
+		VALUES (?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -302,7 +383,7 @@ func loadData(ctx context.Context, cfg Config) error {
 				}
 
 				if _, err := tx.StmtContext(ctx, insPay).ExecContext(ctx,
-					rec.PaymentMD5, rec.PaymentAmount, rec.PaymentEpoch); err != nil {
+					rec.PaymentMD5, rec.AccountUUID, rec.PaymentAmount, rec.PaymentEpoch); err != nil {
 					_ = tx.Rollback()
 					if isDupKey(err) {
 						continue
@@ -411,9 +492,12 @@ func generateRecord(r *rand.Rand, cfg Config) Record {
 	qty := int(randRangeInt64(r, 1, 6))
 	total := round2(price * float64(qty))
 	paymentAmount := total
+	paymentEpoch := now - randRangeInt64(r, 0, 3600*24*30)
+
+	accountUUID := faker.UUIDHyphenated()
 
 	return Record{
-		AccountUUID:    faker.UUIDHyphenated(),
+		AccountUUID:    accountUUID,
 		Username:       faker.Username(),
 		Email:          faker.Email(),
 		Password:       faker.Password(),
@@ -425,9 +509,9 @@ func generateRecord(r *rand.Rand, cfg Config) Record {
 		ProductAuthors: strings.Join([]string{faker.Name(), faker.Name()}, ", "),
 		ProductPrice:   price,
 
-		PaymentMD5:    randomMD5(r),
+		PaymentMD5:    paymentHashMD5(accountUUID, paymentAmount, paymentEpoch),
 		PaymentAmount: paymentAmount,
-		PaymentEpoch:  now - randRangeInt64(r, 0, 3600*24*30),
+		PaymentEpoch:  paymentEpoch,
 
 		Quantity:    qty,
 		TotalAmount: total,
@@ -481,12 +565,11 @@ func round2(f float64) float64 {
 	return math.Round(f*100) / 100
 }
 
-func randomMD5(r *rand.Rand) string {
-	var b [32]byte
-	for i := 0; i < len(b); i++ {
-		b[i] = byte(r.Intn(256))
-	}
-	sum := md5.Sum(b[:]) // #nosec G401 -- demo data only; used as a deterministic 32-char token
+func paymentHashMD5(accountUUID string, amount float64, epoch int64) string {
+	// Use cents to avoid float formatting/rounding differences.
+	cents := int64(math.Round(amount * 100))
+	s := accountUUID + "|" + strconv.FormatInt(cents, 10) + "|" + strconv.FormatInt(epoch, 10)
+	sum := md5.Sum([]byte(s)) // #nosec G401 -- demo data only; used as a 32-char token
 	return hex.EncodeToString(sum[:])
 }
 

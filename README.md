@@ -12,7 +12,7 @@ It will:
 
 Tables (created if missing):
 
-- **`payments`**: `p_md5`, `p_amount`, `p_epoch`
+- **`payments`**: `p_md5`, `p_account_uuid` (FK->accounts), `p_amount`, `p_epoch`
 - **`buying_stats`**: user/product UUIDs, quantity, total amount, epoch
 - **`products`**: UUID, name, authors, price
 - **`accounts`**: UUID, username/email/password, created epoch, last login epoch
