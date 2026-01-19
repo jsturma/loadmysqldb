@@ -1,0 +1,13 @@
+host: localhost
+port: 3306
+user: root
+password: root
+dbname: mytestdb
+runOnlyFaker: false
+numWorkers: 5
+dbRecords2Process: 100
+pcentOutput: 5
+minDays: 259200
+maxDays: 31536000
+delayLastLogin: 500
+

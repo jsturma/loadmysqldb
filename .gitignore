@@ -1,0 +1,4 @@
+mysqldbgen
+bin/pgdbgen
+*.log
+
