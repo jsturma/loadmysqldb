@@ -222,6 +222,47 @@ func ensureDatabaseAndSchema(ctx context.Context, cfg Config) error {
 	if err := migrateSchema(ctx, db, cfg.DBName); err != nil {
 		return fmt.Errorf("migrate schema: %w", err)
 	}
+
+	if err := ensureViews(ctx, db); err != nil {
+		return fmt.Errorf("ensure views: %w", err)
+	}
+	return nil
+}
+
+func ensureViews(ctx context.Context, db *sql.DB) error {
+	stmts := []string{
+		`CREATE OR REPLACE VIEW vw_payments_accounts AS
+			SELECT
+				p.p_md5,
+				p.p_account_uuid,
+				p.p_amount,
+				p.p_epoch,
+				a.a_username,
+				a.a_email,
+				a.a_created_epoch,
+				a.a_last_login_epoch
+			FROM payments p
+			JOIN accounts a ON a.a_uuid = p.p_account_uuid`,
+		`CREATE OR REPLACE VIEW vw_accounts_buying_stats AS
+			SELECT
+				a.a_uuid AS account_uuid,
+				a.a_username,
+				a.a_email,
+				a.a_created_epoch,
+				a.a_last_login_epoch,
+				bs.bs_product_uuid,
+				bs.bs_quantity,
+				bs.bs_total_amount,
+				bs.bs_epoch
+			FROM accounts a
+			JOIN buying_stats bs ON bs.bs_account_uuid = a.a_uuid`,
+	}
+
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
