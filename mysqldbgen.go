@@ -236,11 +236,11 @@ func ensureViews(ctx context.Context, db *sql.DB) error {
 				p.p_md5,
 				p.p_account_uuid,
 				p.p_amount,
-				p.p_epoch,
+				FROM_UNIXTIME(p.p_epoch) AS payment_time,
 				a.a_username,
 				a.a_email,
-				a.a_created_epoch,
-				a.a_last_login_epoch
+				FROM_UNIXTIME(a.a_created_epoch) AS account_created_time,
+				FROM_UNIXTIME(a.a_last_login_epoch) AS account_last_login_time
 			FROM payments p
 			JOIN accounts a ON a.a_uuid = p.p_account_uuid`,
 		`CREATE OR REPLACE VIEW vw_accounts_buying_stats AS
@@ -248,12 +248,12 @@ func ensureViews(ctx context.Context, db *sql.DB) error {
 				a.a_uuid AS account_uuid,
 				a.a_username,
 				a.a_email,
-				a.a_created_epoch,
-				a.a_last_login_epoch,
+				FROM_UNIXTIME(a.a_created_epoch) AS account_created_time,
+				FROM_UNIXTIME(a.a_last_login_epoch) AS account_last_login_time,
 				bs.bs_product_uuid,
 				bs.bs_quantity,
 				bs.bs_total_amount,
-				bs.bs_epoch
+				FROM_UNIXTIME(bs.bs_epoch) AS buying_time
 			FROM accounts a
 			JOIN buying_stats bs ON bs.bs_account_uuid = a.a_uuid`,
 	}
